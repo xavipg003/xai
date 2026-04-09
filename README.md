@@ -1,6 +1,6 @@
 # Object Detection — Inference & Explainability
 
-Pipeline de inferencia y explicabilidad para modelos **Faster R-CNN** preentrenados, con soporte para múltiples backbones y métodos XAI.
+Inference and explainability pipeline for pretrained **Faster R-CNN** models, with support for multiple backbones and XAI methods.
 
 ## Features
 
@@ -92,7 +92,7 @@ The `inf_name` field encodes the model configuration — the code parses it to r
 
 ## Usage
 
-> This project does **not** include training scripts. It expects a pretrained `.ckpt` checkpoint placed in the path specified by `model_path` in the config.
+> This project does **not** include training scripts. It expects a pretrained `.ckpt` checkpoint at the path specified by `model_path` in the config.
 
 ### Inference
 
