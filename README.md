@@ -1,125 +1,142 @@
-# Object Detection Pipeline
+# Object Detection — Inference & Explainability
 
-This repository contains a modular pipeline for training object detection models. It currently supports **Faster R-CNN** and includes an implementation of **DETR**, allowing for easy switching between architectures and configurations.
+Pipeline de inferencia y explicabilidad para modelos **Faster R-CNN** preentrenados, con soporte para múltiples backbones y métodos XAI.
 
 ## Features
 
-  * **Supported Models:**
-      * Faster R-CNN (ResNet, MobileNet, etc.)
-      * DETR (Transformer-based detection)
-  * **Configuration Management:** All training parameters are controlled via centralized **YAML** files.
-  * **Hyperparameter Optimization:** Integrated support for **Optuna**.
-  * **Data Format:** COCO Style (JSON).
+- **Backbones:** ResNet-50, Swin Transformer, custom VGG16
+- **LoRA** support
+- **XAI:** GradCAM (HiResCAM), LIME, SHAP
+- **Configuration:** YAML files via OmegaConf
+- **Data format:** COCO JSON
 
 ## Directory Structure
 
-The project is organized to separate the source code (`src/`) from the configuration (`config/`) and the execution scripts (located at the root).
-
-```text
+```
 .
-├── config/             # YAML configuration files
-├── data/               # Dataset (Images and labels.json)
-├── src/                # Library source code (Models, Engine, Utils)
-├── train.py            # Standard training script
-├── train_optuna.py     # Hyperparameter optimization script, only for Faster-RCNN
-├── eval.py             # Evaluation script (mAP metrics)
-├── inference.py        # Inference script for new images
+├── config/
+│   └── config_faster.yaml      # Configuration for Faster R-CNN
+├── data/
+│   ├── train/
+│   ├── test/
+│   ├── validation/
+│   └── labels.json             # COCO-format annotations
+├── models/
+│   └── fasterrcnn/             # Saved model checkpoints (.ckpt)
+├── output/                     # Inference and XAI output images
+├── src/
+│   └── faster_rcnn/
+│       ├── inference.py
+│       ├── pt_lightning/
+│       │   ├── classes.py      # LightningModule and Dataset
+│       │   └── utils.py        # Model builder, transforms, image saving
+│       └── swin_utils/
+│           └── build.py        # Swin Transformer backbone
+├── inference.py                # Run inference on test images
+├── xai.py                      # Explainability pipeline
 └── requirements.txt
 ```
 
-## Dataset Structure
+## Dataset Format
 
-The project expects data to be organized in a `data/` folder. The `labels.json` file must follow the **COCO Object Detection** standard.
+Data must be organized under `data/` with a single `labels.json` in COCO format:
 
-```text
+```
 data/
-├── train/
 ├── test/
-├── validation/
 └── labels.json
 ```
-Below is an example of the expected JSON structure:
 
 ```json
 {
     "images": [
-        {
-            "id": 1,
-            "file_name": "0566_1176902707_01_WRI-L2_M015.png",
-            "width": 652,
-            "height": 1072
-        }
+        {"id": 1, "file_name": "image.png", "width": 652, "height": 1072}
     ],
     "annotations": [
-        {
-            "id": 1,
-            "image_id": 1,
-            "category_id": 0,
-            "bbox": [186, 468, 188, 77],
-            "area": 14476,
-            "iscrowd": 0
-        }
+        {"id": 1, "image_id": 1, "category_id": 0, "bbox": [186, 468, 188, 77], "area": 14476, "iscrowd": 0}
     ],
     "categories": [
-        {
-            "id": 0,
-            "name": "object"
-        }
+        {"id": 0, "name": "object"}
     ]
 }
 ```
 
 ## Installation
 
-Install the required dependencies:
-
 ```bash
 pip install -r requirements.txt
 ```
 
-## Usage & Execution
+## Configuration
 
-All execution scripts are located at the **root** of the repository.
+Edit `config/config_faster.yaml` before running any script:
 
-### 1\. Standard Training (`train.py`)
+```yaml
+size: 800
+inf_name: "fasterrcnn_lora-True_bs-4_lr-0.0003_size-800-val_map=0.90.ckpt"
 
-The main entry point for training. It loads the configuration, initializes the model and dataset, and runs the training loop with logging and checkpointing.
+model:
+  nclasses: 2
+  model_type: "fasterrcnn"   # fasterrcnn | swin | custom
+  backbone_name: "swin_base_patch4_window7_224"  # only used for swin
+  lora: true
 
-```bash
-# Train Faster R-CNN
-python train.py fasterrcnn 
-
-# Train DETR
-python train.py detr 
+paths:
+  test: "data/test/"
+  labels: "data/labels.json"
+  output_images: "output/"
+  model_path: "models/fasterrcnn"
 ```
 
-### 2\. Hyperparameter Optimization (`train_optuna.py`)
+The `inf_name` field encodes the model configuration — the code parses it to reconstruct the architecture automatically.
 
-A dedicated script that uses **Optuna** to find the best hyperparameters (e.g., learning rate, weight decay). It runs multiple trials based on the search space defined in the config.
+## Usage
 
-```bash
-python train_optuna.py
-```
+> This project does **not** include training scripts. It expects a pretrained `.ckpt` checkpoint placed in the path specified by `model_path` in the config.
 
-### 3\. Evaluation (`eval.py`)
+### Inference
 
-Evaluates a trained model against the test set. It calculates standard metrics such as **mAP** (Mean Average Precision) following COCO standards.
+Runs detection on a random test image and saves the result with bounding boxes to `output/output.png`.
 
 ```bash
-python eval.py fasterrcnn(or DETR)
+python inference.py
 ```
 
-### 4\. Inference (`inference.py`)
+Red boxes = predictions, green boxes = ground truth.
 
-Used to run object detection on new, unseen images. It generates visual results with bounding boxes drawn over the detected objects.
+### Explainability (XAI)
 
 ```bash
-python inference.py fasterrcnn(or DETR)
+# GradCAM on a random image (default)
+python xai.py
+
+# Specific method and image index
+python xai.py --method gradcam --mode single --index 5
+
+# All methods on the full test set
+python xai.py --method all --mode dataset
+
+# Force CPU (e.g. when CUDA is unavailable)
+python xai.py --method gradcam --device cpu
 ```
 
-## Configuration (YAML)
+| Argument | Options | Default | Description |
+|---|---|---|---|
+| `--method` | `gradcam`, `lime`, `shap`, `all` | `gradcam` | Explainability method |
+| `--mode` | `single`, `dataset` | `single` | Single image or full test set |
+| `--index` | integer | random | Image index (single mode only) |
+| `--device` | `cuda`, `cpu` | auto | Device selection (auto-detects CUDA) |
 
-Modify the files in `config/` to adjust your experiments:
+Output is saved under `output/<image_index>/`.
 
-  * `config_faster.yaml`: Standard configuration for Faster R-CNN.
-  * `config_detr.yaml`: Base configuration for DETR.
+**GradCAM** generates one heatmap per target layer combination (14 total).  
+**LIME** highlights superpixel regions most relevant to the detection score.  
+**SHAP** produces a heatmap of feature attributions aggregated across channels.
+
+## Model Backbones
+
+| `model_type` | Backbone | Notes |
+|---|---|---|
+| `fasterrcnn` | ResNet-50 + FPN | Default, pretrained on ImageNet |
+| `swin` | Swin Transformer | Requires `backbone_name` in config |
+| `custom` | VGG16 | Single-scale RoI pooling |
