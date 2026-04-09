@@ -5,55 +5,17 @@ inf_name: "fasterrcnn_lora-True_bs-4_lr-0.00036395119764864127_accum-1_size-800-
 
 model:
   nclasses: 2
-  model_type: "fasterrcnn" #swin, fasterrcnn, custom
-  backbone_name: "swin_base_patch4_window7_224" #swin_base_patch4_window7_224, swin_tiny_patch4_window7_224
+  model_type: "fasterrcnn" # swin, fasterrcnn, custom
+  backbone_name: "swin_base_patch4_window7_224"
   fpn: false
   size: ${size}
   lora: true
 
-# Training parameters
-training:
-  batch_size: 3
-  epochs: 10
-  learning_rate: 0.001
-  accum: 4
-  debug: false
-
 paths:
-  train: "data/train/"
-  validation: "data/validation/"
   test: "data/test/"
   labels: "data/labels.json"
-  checkpoints: "output/checkpoints/"
-  output_images: "output/images/"
+  output_images: "output/"
   model_path: "models/fasterrcnn"
-
-train_transforms:
-  - name: Resize
-    height: ${size}
-    width: ${size}
-    p: 1.0
-
-  - name: RandomBrightnessContrast
-    brightness_limit: 0.1
-    contrast_limit: 0.1
-
-  - name: Rotate
-    limit: 30
-    p: 0.5
-
-  - name: Affine
-    translate_percent: 0.1
-    scale: 1.0
-    rotate: 0
-    p: 0.5
-
-  - name: Normalize
-    mean: [0, 0, 0]
-    std: [1, 1, 1]
-    max_pixel_value: 255.0
-
-  - name: ToTensorV2
 
 test_transforms:
   - name: Resize
