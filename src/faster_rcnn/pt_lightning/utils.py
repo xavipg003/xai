@@ -53,6 +53,8 @@ def gethyperparameters(config):
         config['model']['backbone_name'] = "_".join(parts[1:6]).split('-')[1]
         config['model']['fpn'] = parts[6].split('-')[1] == "True"
         config['model']['lora'] = parts[7].split('-')[1] == "True"
+        if config['model']['lora']:
+            config['model']['lora_r'] = int(parts[8].split('-')[1])
     else:
         config['model']['lora'] = parts[1].split('-')[1] == "True"
     return config

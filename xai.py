@@ -1,14 +1,29 @@
 import argparse
+import csv
 import os
 import random
 import warnings
+
 import numpy as np
 import torch
 from omegaconf import OmegaConf
-from src.faster_rcnn.pt_lightning.utils import build_model, gethyperparameters, save_image
+
+from src.faster_rcnn.pt_lightning.utils import build_model, gethyperparameters
 from src.faster_rcnn.pt_lightning.classes import MyDataModule, CustomModel
+from xai_src.gradcam import run_gradcam
+from xai_src.lime import run_lime
+from xai_src.shap_xai import run_shap
+from xai_src.ig import run_integrated_gradients
+from xai_src.metrics import compute_metrics
 
 warnings.filterwarnings("ignore", category=UserWarning)
+
+METHODS = {
+    'gradcam': run_gradcam,
+    'lime': run_lime,
+    'shap': run_shap,
+    'ig': run_integrated_gradients,
+}
 
 
 def get_device(force_cpu=False):
@@ -38,154 +53,86 @@ def load_model_and_data(config, device):
     return Lmodel, datamodule.test_dataset, config
 
 
-def run_gradcam(Lmodel, inputs, output_dir, idx, device):
-    from pytorch_grad_cam import HiResCAM
-    from pytorch_grad_cam.utils.model_targets import FasterRCNNBoxScoreTarget
-    from pytorch_grad_cam.utils.image import show_cam_on_image
+def save_predictions_txt(output_dir, idx, image_name, orig_size, gt_boxes, gt_labels,
+                         pred_boxes, pred_labels, pred_scores, threshold, model_name=""):
+    img_out_dir = os.path.join(output_dir, str(idx))
+    os.makedirs(img_out_dir, exist_ok=True)
+    i = 0
+    while os.path.exists(os.path.join(img_out_dir, f"{idx}_predictions_{i}.txt")):
+        i += 1
+    txt_path = os.path.join(img_out_dir, f"{idx}_predictions_{i}.txt")
+    with open(txt_path, 'w') as f:
+        f.write(f"Model         : {model_name}\n")
+        f.write(f"Image index   : {idx}\n")
+        f.write(f"Image file    : {image_name}\n")
+        f.write(f"Original size : H={orig_size[0]}  W={orig_size[1]}\n")
+        f.write(f"Threshold     : {threshold}\n")
 
-    model = Lmodel.model
+        f.write("\n--- Ground Truth ---\n")
+        if len(gt_boxes) == 0:
+            f.write("  (none)\n")
+        else:
+            for i, (box, lbl) in enumerate(zip(gt_boxes, gt_labels)):
+                f.write(f"  [{i}] label={int(lbl)}  "
+                        f"box=[{box[0]:.1f}, {box[1]:.1f}, {box[2]:.1f}, {box[3]:.1f}]\n")
+
+        f.write(f"\n--- Predictions (all, sorted by score) ---\n")
+        if len(pred_boxes) == 0:
+            f.write("  (none)\n")
+        else:
+            order = pred_scores.argsort()[::-1]
+            for i, k in enumerate(order):
+                marker = "✓" if pred_scores[k] >= threshold else "✗"
+                f.write(f"  [{i}] {marker}  label={int(pred_labels[k])}  "
+                        f"score={pred_scores[k]:.4f}  "
+                        f"box=[{pred_boxes[k][0]:.1f}, {pred_boxes[k][1]:.1f}, "
+                        f"{pred_boxes[k][2]:.1f}, {pred_boxes[k][3]:.1f}]\n")
+
+        n_above = int((pred_scores >= threshold).sum())
+        f.write(f"\nDetections above threshold: {n_above}/{len(pred_boxes)}\n")
+    print(f"  Predictions saved → {txt_path}")
+
+
+def process_image(Lmodel, inputs, idx, methods, output_dir, device, threshold, metrics_log, compute,
+                  image_name="", model_name=""):
+    gt_boxes = inputs[1]['boxes'].cpu().numpy()
+    gt_labels = inputs[1]['labels'].cpu().numpy()
     orig_size = inputs[2]
 
     with torch.no_grad():
-        preds = model([inputs[0].to(device)])
+        preds = Lmodel.model([inputs[0].to(device)])
+    pred_boxes  = preds[0]['boxes'].cpu().numpy()
+    pred_labels = preds[0]['labels'].cpu().numpy()
+    pred_scores = preds[0]['scores'].cpu().numpy()
 
-    boxes = preds[0]["boxes"]
-    labels = preds[0]["labels"]
-    scores = preds[0]["scores"]
+    save_predictions_txt(output_dir, idx, image_name, orig_size,
+                         gt_boxes, gt_labels, pred_boxes, pred_labels, pred_scores, threshold,
+                         model_name=model_name)
 
-    mask = scores > 0.75
-    boxes, labels, scores = boxes[mask], labels[mask], scores[mask]
+    for method in methods:
+        print(f"  [{method}]")
+        heatmap = METHODS[method](Lmodel, inputs, output_dir, idx, device, threshold)
+        if compute:
+            if heatmap is None:
+                print(f"    Metrics skipped (no heatmap).")
+                continue
+            m = compute_metrics(heatmap, Lmodel.model, inputs[0], gt_boxes,
+                                device, output_dir, idx, method)
+            metrics_log[method].append({'idx': idx, **m})
+            print(f"    pointing_game={m['pointing_game']:.3f}  "
+                  f"iou={m['iou']:.3f}  "
+                  f"deletion_auc={m['deletion_auc']:.3f}")
 
-    if len(boxes) == 0:
-        print(f"  No detections above threshold for image {idx}, skipping GradCAM.")
-        return
-
-    layers_list = [
-        [model.backbone.body.layer1[-1]],
-        [model.backbone.body.layer2[-1]],
-        [model.backbone.body.layer3[-1]],
-        [model.backbone.body.layer4[-1]],
-        [model.backbone.fpn.inner_blocks[0]],
-        [model.backbone.fpn.inner_blocks[1]],
-        [model.backbone.fpn.inner_blocks[2]],
-        [model.backbone.fpn.inner_blocks[-1]],
-        [model.backbone.fpn.layer_blocks[0]],
-        [model.backbone.fpn.layer_blocks[1]],
-        [model.backbone.fpn.layer_blocks[2]],
-        [model.backbone.fpn.layer_blocks[3]],
-        [model.backbone.body.layer3[-1], model.backbone.body.layer4[-1]],
-        [model.backbone.fpn.layer_blocks[0], model.backbone.fpn.layer_blocks[2]],
-    ]
-
-    targets = [FasterRCNNBoxScoreTarget(labels=labels, bounding_boxes=boxes)]
-    img_out_dir = os.path.join(output_dir, str(idx))
-    os.makedirs(img_out_dir, exist_ok=True)
-
-    for i, target_layers in enumerate(layers_list):
-        with HiResCAM(model=model, target_layers=target_layers) as cam:
-            grayscale_cam = cam(input_tensor=inputs[0].unsqueeze(0).to(device), targets=targets)
-
-        cam_image = show_cam_on_image(inputs[0].permute(1, 2, 0).numpy(), grayscale_cam[0], use_rgb=True)
-        save_image(cam_image, os.path.join(img_out_dir, f"{idx}_gradcam_{i}.png"),
-                   ground_truth=inputs[1]['boxes'].cpu().numpy(),
-                   prediction=boxes.cpu(),
-                   scores=scores.cpu(),
-                   threshold=0.75, orig_size=orig_size)
-
-
-def run_lime(Lmodel, inputs, output_dir, idx, device):
-    from lime import lime_image
-    from skimage.segmentation import mark_boundaries
-
-    orig_size = inputs[2]
-    image = inputs[0].permute(1, 2, 0).numpy()
-
-    def predict(images):
-        scores = []
-        with torch.no_grad():
-            for img in images:
-                img = torch.tensor(img).permute(2, 0, 1).to(device)
-                outputs = Lmodel.model([img])
-                scores.append([outputs[0]['scores'].max().item() if len(outputs[0]['scores']) > 0 else 0.0])
-        return np.array(scores)
-
-    explainer = lime_image.LimeImageExplainer()
-    explanation = explainer.explain_instance(image, predict, top_labels=1, num_samples=1000)
-
-    temp, mask = explanation.get_image_and_mask(
-        explanation.top_labels[0],
-        positive_only=True,
-        hide_rest=False
-    )
-    result = mark_boundaries(temp, mask)
-
-    img_out_dir = os.path.join(output_dir, str(idx))
-    os.makedirs(img_out_dir, exist_ok=True)
-    save_image(result, os.path.join(img_out_dir, f"{idx}_lime.png"),
-               ground_truth=inputs[1]['boxes'].cpu().numpy(), orig_size=orig_size)
-
-
-def run_shap(Lmodel, inputs, output_dir, idx, device):
-    import shap
-    import cv2
-    from matplotlib import pyplot as plt
-
-    orig_size = inputs[2]
-    image = inputs[0].permute(1, 2, 0).numpy()
-
-    def predict(images):
-        scores = []
-        with torch.no_grad():
-            for img in images:
-                img = torch.tensor(img).permute(2, 0, 1).to(device)
-                outputs = Lmodel.model([img])
-                scores.append([outputs[0]['scores'].max().item() if len(outputs[0]['scores']) > 0 else 0.0])
-        return np.array(scores)
-
-    masker = shap.maskers.Image("blur(128,128)", image.shape)
-    explainer = shap.Explainer(predict, masker)
-    shap_values = explainer(image[np.newaxis, ...], max_evals=1000)
-
-    shap_vals = shap_values.values.squeeze()
-    heatmap = shap_vals.sum(axis=-1)
-
-    img_out_dir = os.path.join(output_dir, str(idx))
-    os.makedirs(img_out_dir, exist_ok=True)
-    out_path = os.path.join(img_out_dir, f"{idx}_shap_heatmap.png")
-
-    fig, ax = plt.subplots()
-    ax.imshow(image)
-    abs_max = np.abs(heatmap).max()
-    ax.imshow(heatmap, cmap='RdBu', alpha=0.6, vmin=-abs_max, vmax=abs_max)
-    ax.axis('off')
-    plt.savefig(out_path, bbox_inches='tight')
-    plt.close(fig)
-
-    if orig_size is not None:
-        img = cv2.imread(out_path)
-        img = cv2.resize(img, (orig_size[1], orig_size[0]))
-        cv2.imwrite(out_path, img)
-
-    save_image(image, os.path.join(img_out_dir, f"{idx}_shap_gt.png"),
-               ground_truth=inputs[1]['boxes'].cpu().numpy(), orig_size=orig_size)
-
-
-METHODS = {
-    'gradcam': run_gradcam,
-    'lime': run_lime,
-    'shap': run_shap,
-}
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="XAI explainability pipeline for object detector")
-    parser.add_argument('--method', choices=['gradcam', 'lime', 'shap', 'all'], default='gradcam',
-                        help="Explainability method (default: gradcam)")
-    parser.add_argument('--mode', choices=['single', 'dataset'], default='single',
-                        help="Run on a single image or the full test dataset (default: single)")
-    parser.add_argument('--index', type=int, default=None,
-                        help="Image index for single mode (random if not specified)")
-    parser.add_argument('--device', choices=['cuda', 'cpu'], default=None,
-                        help="Device to use: 'cuda' or 'cpu'. Auto-detects if not specified.")
+    parser.add_argument('--method', choices=['gradcam', 'lime', 'shap', 'ig', 'all'], default='gradcam')
+    parser.add_argument('--mode', choices=['single', 'dataset'], default='single')
+    parser.add_argument('--index', type=int, default=None)
+    parser.add_argument('--device', choices=['cuda', 'cpu'], default=None)
+    parser.add_argument('--threshold', type=float, default=0.5)
+    parser.add_argument('--metrics', action='store_true',
+                        help="Compute XAI metrics: Pointing Game, IoU, Deletion Curve AUC")
     args = parser.parse_args()
 
     device = get_device(force_cpu=(args.device == 'cpu'))
@@ -197,20 +144,37 @@ if __name__ == "__main__":
     config = OmegaConf.load("config/config_faster.yaml")
     Lmodel, test_dataset, config = load_model_and_data(config, device)
     output_dir = config['paths']['output_images']
+    model_name = config['inf_name']
 
     methods = list(METHODS.keys()) if args.method == 'all' else [args.method]
+    metrics_log = {m: [] for m in methods}
 
     if args.mode == 'single':
         idx = args.index if args.index is not None else random.randint(0, len(test_dataset) - 1)
-        inputs = test_dataset[idx]
         print(f"Running {methods} on image index {idx}")
-        for method in methods:
-            print(f"  [{method}]")
-            METHODS[method](Lmodel, inputs, output_dir, idx, device)
+        process_image(Lmodel, test_dataset[idx], idx, methods, output_dir, device, args.threshold,
+                      metrics_log, args.metrics, image_name=test_dataset.img_names[idx],
+                      model_name=model_name)
     else:
         for idx in range(len(test_dataset)):
-            inputs = test_dataset[idx]
             print(f"Image {idx + 1}/{len(test_dataset)}")
-            for method in methods:
-                print(f"  [{method}]")
-                METHODS[method](Lmodel, inputs, output_dir, idx, device)
+            process_image(Lmodel, test_dataset[idx], idx, methods, output_dir, device, args.threshold,
+                          metrics_log, args.metrics, image_name=test_dataset.img_names[idx],
+                          model_name=model_name)
+
+    if args.metrics and args.mode == 'dataset':
+        for method, rows in metrics_log.items():
+            if not rows:
+                continue
+            csv_path = os.path.join(output_dir, f"metrics_{method}.csv")
+            with open(csv_path, 'w', newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=['idx', 'pointing_game', 'iou', 'deletion_auc'])
+                writer.writeheader()
+                writer.writerows(rows)
+
+            pg_mean  = np.mean([r['pointing_game'] for r in rows])
+            iou_mean = np.mean([r['iou'] for r in rows])
+            del_mean = np.mean([r['deletion_auc'] for r in rows])
+            print(f"\n[{method}] Dataset averages — "
+                  f"pointing_game={pg_mean:.3f}  iou={iou_mean:.3f}  deletion_auc={del_mean:.3f}")
+            print(f"  Saved per-image metrics to {csv_path}")
