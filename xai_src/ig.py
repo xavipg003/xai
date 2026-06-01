@@ -62,11 +62,23 @@ def run_integrated_gradients(Lmodel, inputs, output_dir, idx, device, threshold=
 
     fig, ax = plt.subplots()
     ax.imshow(image_np)
-    abs_max = np.percentile(np.abs(heatmap_vis), 99)
+    abs_max = np.percentile(np.abs(heatmap_vis), 95)
     if abs_max > 0:
         from scipy.ndimage import gaussian_filter
-        heatmap_vis = gaussian_filter(heatmap_vis, sigma=8)
-        ax.imshow(heatmap_vis, cmap='RdBu', alpha=0.6, vmin=-abs_max, vmax=abs_max)
+        heatmap_vis = gaussian_filter(heatmap_vis, sigma=4)
+        # Gamma correction to boost mid-range values
+        sign = np.sign(heatmap_vis)
+        heatmap_vis = sign * np.power(np.abs(heatmap_vis) / (abs_max + 1e-8), 0.5) * abs_max
+
+        # Variable alpha: transparent where activation is low, opaque where high
+        norm_intensity = np.abs(heatmap_vis) / (abs_max + 1e-8)  # [0, 1]
+        alpha_channel = np.clip(norm_intensity, 0, 1) * 0.85    # max opacity 0.85
+
+        cmap = plt.get_cmap('RdBu')
+        norm = plt.Normalize(vmin=-abs_max, vmax=abs_max)
+        heatmap_rgba = cmap(norm(heatmap_vis))                   # (H, W, 4)
+        heatmap_rgba[..., 3] = alpha_channel
+        ax.imshow(heatmap_rgba)
     ax.axis('off')
     plt.savefig(out_path, bbox_inches='tight')
     plt.close(fig)

@@ -9,3 +9,4 @@ env/
 *.png
 *.jpg
 CLAUDE.md
+nohup.out

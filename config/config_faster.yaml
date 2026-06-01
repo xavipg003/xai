@@ -1,7 +1,7 @@
 # config.yaml
 
 size: 800
-inf_name: "swin_backbone-swin_tiny_patch4_window7_224_fpn-True_lora-False_r-NA_bs-2_lr-0.000579_accum-1_size-800-val_map=0.51.ckpt"
+inf_name: "swin_backbone-swin_tiny_patch4_window7_224_fpn-True_lora-True_r-32_bs-2_lr-0.000964_accum-1_size-800-val_map=0.47.ckpt"
 model:
   nclasses: 2
   model_type: "swin" #swin, default, custom
@@ -26,7 +26,7 @@ paths:
   test: "data/test/"
   labels: "data/labels.json"
   checkpoints: "output/checkpoints/"
-  output_images: "output/images/"
+  output_images: "output/temp/"
   model_path: "models/fasterrcnn"
 
 train_transforms:

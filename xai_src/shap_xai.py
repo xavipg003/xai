@@ -34,8 +34,14 @@ def run_shap(Lmodel, inputs, output_dir, idx, device, threshold=0.5):
 
     fig, ax = plt.subplots()
     ax.imshow(image)
+
     abs_max = np.abs(heatmap).max()
-    ax.imshow(heatmap, cmap='RdBu', alpha=0.6, vmin=-abs_max, vmax=abs_max)
+    if abs_max > 0:
+        norm = heatmap / abs_max          # [-1, 1]
+        rgba = plt.cm.RdBu_r((norm + 1) / 2)  # colormap expects [0, 1]
+        rgba[..., 3] = np.abs(norm)       # alpha = |activation|, 0 where flat
+        ax.imshow(rgba)
+
     ax.axis('off')
     plt.savefig(out_path, bbox_inches='tight')
     plt.close(fig)

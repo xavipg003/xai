@@ -1,5 +1,6 @@
 import argparse
 import csv
+import json
 import os
 import random
 import warnings
@@ -10,7 +11,7 @@ from omegaconf import OmegaConf
 
 from src.faster_rcnn.pt_lightning.utils import build_model, gethyperparameters
 from src.faster_rcnn.pt_lightning.classes import MyDataModule, CustomModel
-from xai_src.gradcam import run_gradcam
+from xai_src.gradcam import run_gradcam, list_gradcam_layers
 from xai_src.lime import run_lime
 from xai_src.shap_xai import run_shap
 from xai_src.ig import run_integrated_gradients
@@ -93,6 +94,16 @@ def save_predictions_txt(output_dir, idx, image_name, orig_size, gt_boxes, gt_la
     print(f"  Predictions saved → {txt_path}")
 
 
+def save_metrics_per_image(output_dir, idx, metrics_per_method):
+    """Save XAI metrics for all computed methods to a single JSON file in the image directory."""
+    img_out_dir = os.path.join(output_dir, str(idx))
+    os.makedirs(img_out_dir, exist_ok=True)
+    out_path = os.path.join(img_out_dir, f"{idx}_metrics.json")
+    with open(out_path, 'w') as f:
+        json.dump(metrics_per_method, f, indent=2)
+    print(f"  Metrics saved → {out_path}")
+
+
 def process_image(Lmodel, inputs, idx, methods, output_dir, device, threshold, metrics_log, compute,
                   image_name="", model_name=""):
     gt_boxes = inputs[1]['boxes'].cpu().numpy()
@@ -109,6 +120,12 @@ def process_image(Lmodel, inputs, idx, methods, output_dir, device, threshold, m
                          gt_boxes, gt_labels, pred_boxes, pred_labels, pred_scores, threshold,
                          model_name=model_name)
 
+    if len(gt_boxes) == 0:
+        print(f"  Skipping XAI methods (empty ground truth).")
+        return
+
+    metrics_per_image = {}  # {method: {metric: value}}
+
     for method in methods:
         print(f"  [{method}]")
         heatmap = METHODS[method](Lmodel, inputs, output_dir, idx, device, threshold)
@@ -119,9 +136,13 @@ def process_image(Lmodel, inputs, idx, methods, output_dir, device, threshold, m
             m = compute_metrics(heatmap, Lmodel.model, inputs[0], gt_boxes,
                                 device, output_dir, idx, method)
             metrics_log[method].append({'idx': idx, **m})
+            metrics_per_image[method] = m
             print(f"    pointing_game={m['pointing_game']:.3f}  "
                   f"iou={m['iou']:.3f}  "
                   f"deletion_auc={m['deletion_auc']:.3f}")
+
+    if compute and metrics_per_image:
+        save_metrics_per_image(output_dir, idx, metrics_per_image)
 
 
 if __name__ == "__main__":
@@ -133,6 +154,8 @@ if __name__ == "__main__":
     parser.add_argument('--threshold', type=float, default=0.5)
     parser.add_argument('--metrics', action='store_true',
                         help="Compute XAI metrics: Pointing Game, IoU, Deletion Curve AUC")
+    parser.add_argument('--dry-run', action='store_true',
+                        help="Print all available GradCAM layers and exit")
     args = parser.parse_args()
 
     device = get_device(force_cpu=(args.device == 'cpu'))
@@ -145,6 +168,10 @@ if __name__ == "__main__":
     Lmodel, test_dataset, config = load_model_and_data(config, device)
     output_dir = config['paths']['output_images']
     model_name = config['inf_name']
+
+    if args.dry_run:
+        list_gradcam_layers(Lmodel.model)
+        exit(0)
 
     methods = list(METHODS.keys()) if args.method == 'all' else [args.method]
     metrics_log = {m: [] for m in methods}
